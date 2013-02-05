@@ -10,6 +10,7 @@ to be an installation dependency for our packages yet--it is still too unstable
 import os
 import re
 import sys
+import traceback
 
 from collections import defaultdict
 
@@ -28,6 +29,62 @@ except ImportError:
 # A simplified RE for this; just checks that the line ends with version
 # predicates in ()
 _VERSION_SPEC_RE = re.compile(r'\s*(.*?)\s*\((.*)\)\s*$')
+
+
+# Mappings from setup() keyword arguments to setup.cfg options;
+# The values are (section, option) tuples, or simply (section,) tuples if
+# the option has the same name as the setup() argument
+D1_D2_SETUP_ARGS = {
+    "name": ("metadata",),
+    "version": ("metadata",),
+    "author": ("metadata",),
+    "author_email": ("metadata",),
+    "maintainer": ("metadata",),
+    "maintainer_email": ("metadata",),
+    "url": ("metadata", "home_page"),
+    "description": ("metadata", "summary"),
+    "keywords": ("metadata",),
+    "long_description": ("metadata", "description"),
+    "download-url": ("metadata",),
+    "classifiers": ("metadata", "classifier"),
+    "platforms": ("metadata", "platform"),  # **
+    "license": ("metadata",),
+    # Use setuptools install_requires, not
+    # broken distutils requires
+    "install_requires": ("metadata", "requires_dist"),
+    "provides": ("metadata", "provides_dist"),  # **
+    "obsoletes": ("metadata", "obsoletes_dist"),  # **
+    "package_dir": ("files", 'packages_root'),
+    "packages": ("files",),
+    "package_data": ("files",),
+    "data_files": ("files",),
+    "scripts": ("files",),
+    "py_modules": ("files", "modules"),   # **
+    "cmdclass": ("global", "commands"),
+    # Not supported in distutils2, but provided for
+    # backwards compatibility with setuptools
+    "use_2to3": ("backwards_compat", "use_2to3"),
+    "zip_safe": ("backwards_compat", "zip_safe")
+}
+
+# setup() arguments that can have multiple values in setup.cfg
+MULTI_FIELDS = ("classifiers",
+                "platforms",
+                "install_requires",
+                "provides",
+                "obsoletes",
+                "packages",
+                "package_data",
+                "data_files",
+                "scripts",
+                "py_modules",
+                "cmdclass")
+
+# setup() arguments that contain boolean values
+BOOL_FIELDS = ("use_2to3", "zip_safe")
+
+
+CSV_FIELDS = ("keywords",)
 
 
 def resolve_name(name):
@@ -60,8 +117,6 @@ def resolve_name(name):
     return ret
 
 
-
-# TODO: This is getting pretty hefty; might want to break it up a bit
 def cfg_to_args(path='setup.cfg'):
     """ Distutils2 to distutils1 compatibility util.
 
@@ -74,54 +129,6 @@ def cfg_to_args(path='setup.cfg'):
             When the setup.cfg file is not found.
 
     """
-    # We need to declare the following constants here so that it's easier to
-    # generate the setup.py afterwards, using inspect.getsource.
-
-    # XXX ** == needs testing
-    D1_D2_SETUP_ARGS = {"name": ("metadata",),
-                        "version": ("metadata",),
-                        "author": ("metadata",),
-                        "author_email": ("metadata",),
-                        "maintainer": ("metadata",),
-                        "maintainer_email": ("metadata",),
-                        "url": ("metadata", "home_page"),
-                        "description": ("metadata", "summary"),
-                        "long_description": ("metadata", "description"),
-                        "download-url": ("metadata",),
-                        "classifiers": ("metadata", "classifier"),
-                        "platforms": ("metadata", "platform"),  # **
-                        "license": ("metadata",),
-                        # Use setuptools install_requires, not
-                        # broken distutils requires
-                        "install_requires": ("metadata", "requires_dist"),
-                        "provides": ("metadata", "provides_dist"),  # **
-                        "obsoletes": ("metadata", "obsoletes_dist"),  # **
-                        "package_dir": ("files", 'packages_root'),
-                        "packages": ("files",),
-                        "package_data": ("files",),
-                        "data_files": ("files",),
-                        "scripts": ("files",),
-                        "py_modules": ("files", "modules"),   # **
-                        "cmdclass": ("global", "commands"),
-                        # Not supported in distutils2, but provided for
-                        # backwards compatibility with setuptools
-                        "use_2to3": ("backwards_compat", "use_2to3"),
-                        "zip_safe": ("backwards_compat", "zip_safe")
-                        }
-
-    MULTI_FIELDS = ("classifiers",
-                    "platforms",
-                    "install_requires",
-                    "provides",
-                    "obsoletes",
-                    "packages",
-                    "package_data",
-                    "data_files",
-                    "scripts",
-                    "py_modules",
-                    "cmdclass")
-
-    BOOL_FIELDS = ("use_2to3", "zip_safe")
 
     # The method source code really starts here.
     parser = RawConfigParser()
@@ -134,17 +141,52 @@ def cfg_to_args(path='setup.cfg'):
         config[section] = dict(parser.items(section))
 
     # Run setup_hooks, if configured
-    # TODO: We need a better way of displaying errors that occur in setup_hook;
-    # right now they only show up as errors 'parsing' the cfg file.  A
-    # traceback and other info would be nice...
     setup_hooks = has_get_option(config, 'global', 'setup_hooks')
-    if setup_hooks:
-        setup_hooks = split_multiline(setup_hooks)
-        for hook in setup_hooks:
-            hook = resolve_name(hook)
-            hook(config)
+    package_dir = has_get_option(config, 'files', 'packages_root')
+    # Add the source package directory to sys.path in case it contains
+    # additional hooks, and to make sure it's on the path before any existing
+    # installations of the package
+    if package_dir:
+        package_dir = os.path.abspath(package_dir)
+        sys.path.insert(0, package_dir)
 
-    register_custom_compilers(config)
+    try:
+        if setup_hooks:
+            setup_hooks = split_multiline(setup_hooks)
+            for hook in setup_hooks:
+                hook_fn = resolve_name(hook)
+                try :
+                    hook_fn(config)
+                except Exception as e:
+                    sys.stderr.write("setup hook %s raised exception: %s\n"% (hook, e))
+                    traceback.print_exc(file=sys.stderr)
+                    raise
+
+        kwargs = setup_cfg_to_setup_kwargs(config)
+
+        register_custom_compilers(config)
+
+        ext_modules = get_extension_modules(config)
+        if ext_modules:
+            kwargs['ext_modules'] = ext_modules
+
+        entry_points = get_entry_points(config)
+        if entry_points:
+            kwargs['entry_points'] = entry_points
+
+        wrap_commands(kwargs)
+    finally:
+        # Perform cleanup if any paths were added to sys.path
+        if package_dir:
+            sys.path.pop(0)
+
+    return kwargs
+
+
+def setup_cfg_to_setup_kwargs(config):
+    """Processes the setup.cfg options and converts them to arguments accepted
+    by setuptools' setup() function.
+    """
 
     kwargs = {}
 
@@ -163,7 +205,7 @@ def cfg_to_args(path='setup.cfg'):
             # There is no such option in the setup.cfg
             if arg == "long_description":
                 in_cfg_value = has_get_option(config, section,
-                                              "description-file")
+                                              "description_file")
                 if in_cfg_value:
                     in_cfg_value = split_multiline(in_cfg_value)
                     value = ''
@@ -177,6 +219,8 @@ def cfg_to_args(path='setup.cfg'):
             else:
                 continue
 
+        if arg in CSV_FIELDS:
+            in_cfg_value = split_csv(in_cfg_value)
         if arg in MULTI_FIELDS:
             in_cfg_value = split_multiline(in_cfg_value)
         elif arg in BOOL_FIELDS:
@@ -233,15 +277,6 @@ def cfg_to_args(path='setup.cfg'):
 
         kwargs[arg] = in_cfg_value
 
-    ext_modules = get_extension_modules(config)
-    if ext_modules:
-        kwargs['ext_modules'] = ext_modules
-
-    entry_points = get_entry_points(config)
-    if entry_points:
-        kwargs['entry_points'] = entry_points
-
-    wrap_commands(kwargs)
     return kwargs
 
 
@@ -416,7 +451,12 @@ def run_command_hooks(cmd_obj, hook_kind):
 
         log.info('running %s %s for command %s',
                  hook_kind, hook, cmd_obj.get_command_name())
-        hook_obj(cmd_obj)
+
+        try :
+            hook_obj(cmd_obj)
+        except Exception as e :
+            sys.stderr.write("hook %s raised exception: %s\n"% (hook, e))
+            traceback.print_exc(file=sys.stderr)
 
 
 def has_get_option(config, section, option):
@@ -433,6 +473,15 @@ def split_multiline(value):
 
     value = [element for element in
              (line.strip() for line in value.split('\n'))
+             if element]
+    return value
+
+
+def split_csv(value):
+    """Special behaviour when we have a comma separated options"""
+
+    value = [element for element in
+             (chunk.strip() for chunk in value.split(','))
              if element]
     return value
 
@@ -466,4 +515,10 @@ class IgnoreDict(dict):
         super(IgnoreDict, self).__setitem__(key, val)
 
 
+def nop_hook(*l, **kw):
+    sys.stderr.write("NOP hook - d2to1.util.nop_hook\n")
 
+
+def exception_hook(*l, **kw):
+    sys.stderr.write("EXCEPTION hook - d2to1.util.exception_hook\n")
+    raise Exception('Called d2to1.util.exception_hook')

@@ -7,6 +7,15 @@ to be an installation dependency for our packages yet--it is still too unstable
 (the latest version on PyPI doesn't even install).
 """
 
+# These first two imports are not used, but are needed to get around an
+# irritating Python bug that can crop up when using ./setup.py test.
+# See: http://www.eby-sarna.com/pipermail/peak/2010-May/003355.html
+try:
+    import multiprocessing
+except ImportError:
+    pass
+import logging
+
 import os
 import re
 import sys
@@ -19,12 +28,12 @@ import distutils.ccompiler
 from distutils import log
 from distutils.errors import (DistutilsOptionError, DistutilsModuleError,
                               DistutilsFileError)
+from setuptools.command.egg_info import manifest_maker
 from setuptools.dist import Distribution
 from setuptools.extension import Extension
-try:
-    from ConfigParser import RawConfigParser
-except ImportError:
-    from configparser import RawConfigParser
+
+from .extern.six import moves as m
+RawConfigParser = m.configparser.RawConfigParser
 
 
 # A simplified RE for this; just checks that the line ends with version
@@ -65,7 +74,8 @@ D1_D2_SETUP_ARGS = {
     # Not supported in distutils2, but provided for
     # backwards compatibility with setuptools
     "use_2to3": ("backwards_compat", "use_2to3"),
-    "zip_safe": ("backwards_compat", "zip_safe")
+    "zip_safe": ("backwards_compat", "zip_safe"),
+    "tests_require": ("backwards_compat", "tests_require"),
 }
 
 # setup() arguments that can have multiple values in setup.cfg
@@ -79,6 +89,7 @@ MULTI_FIELDS = ("classifiers",
                 "data_files",
                 "scripts",
                 "py_modules",
+                "tests_require",
                 "cmdclass")
 
 # setup() arguments that contain boolean values
@@ -86,6 +97,9 @@ BOOL_FIELDS = ("use_2to3", "zip_safe")
 
 
 CSV_FIELDS = ("keywords",)
+
+
+log.set_verbosity(log.INFO)
 
 
 def resolve_name(name):
@@ -146,6 +160,7 @@ def cfg_to_args(path='setup.cfg'):
     # Run setup_hooks, if configured
     setup_hooks = has_get_option(config, 'global', 'setup_hooks')
     package_dir = has_get_option(config, 'files', 'packages_root')
+
     # Add the source package directory to sys.path in case it contains
     # additional hooks, and to make sure it's on the path before any existing
     # installations of the package
@@ -160,7 +175,8 @@ def cfg_to_args(path='setup.cfg'):
                 hook_fn = resolve_name(hook)
                 try :
                     hook_fn(config)
-                except Exception as e:
+                except:
+                    e = sys.exc_info()[1]
                     log.error('setup hook %s raised exception: %s\n' %
                               (hook, e))
                     log.error(traceback.format_exc())
@@ -179,6 +195,26 @@ def cfg_to_args(path='setup.cfg'):
             kwargs['entry_points'] = entry_points
 
         wrap_commands(kwargs)
+
+        # Handle the [files]/extra_files option
+        extra_files = has_get_option(config, 'files', 'extra_files')
+        if extra_files:
+            extra_files = split_multiline(extra_files)
+            # Let's do a sanity check
+            for filename in extra_files:
+                if not os.path.exists(filename):
+                    raise DistutilsFileError(
+                        '%s from the extra_files option in setup.cfg does not '
+                        'exist' % filename)
+            # Unfortunately the only really sensible way to do this is to
+            # monkey-patch the manifest_maker class
+            @monkeypatch_method(manifest_maker)
+            def add_defaults(self, extra_files=extra_files, log=log):
+                log.info('[d2to1] running patched manifest_maker command '
+                          'with extra_files support')
+                add_defaults._orig(self)
+                self.filelist.extend(extra_files)
+
     finally:
         # Perform cleanup if any paths were added to sys.path
         if package_dir:
@@ -235,7 +271,7 @@ def setup_cfg_to_setup_kwargs(config):
                 in_cfg_value = False
 
         if in_cfg_value:
-            if arg == 'install_requires':
+            if arg in ('install_requires', 'tests_require'):
                 # Replaces PEP345-style version specs with the sort expected by
                 # setuptools
                 in_cfg_value = [_VERSION_SPEC_RE.sub(r'\1\2', pred)
@@ -459,7 +495,8 @@ def run_command_hooks(cmd_obj, hook_kind):
 
         try :
             hook_obj(cmd_obj)
-        except Exception as e :
+        except:
+            e = sys.exc_info()[1]
             log.error('hook %s raised exception: %s\n' % (hook, e))
             log.error(traceback.format_exc())
             sys.exit(1)
@@ -490,6 +527,21 @@ def split_csv(value):
              (chunk.strip() for chunk in value.split(','))
              if element]
     return value
+
+
+def monkeypatch_method(cls):
+    """A function decorator to monkey-patch a method of the same name on the
+    given class.
+    """
+
+    def wrapper(func):
+        orig = getattr(cls, func.__name__, None)
+        if orig and not hasattr(orig, '_orig'):  # Already patched
+            setattr(func, '_orig', orig)
+            setattr(cls, func.__name__, func)
+        return func
+
+    return wrapper
 
 
 # The following classes are used to hack Distribution.command_options a bit

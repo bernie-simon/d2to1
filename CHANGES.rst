@@ -2,7 +2,21 @@ Changes
 =========
 
 
-0.2.8 (unreleased)
+0.2.10 (unreleased)
+-------------------
+
+- Nothing changed yet.
+
+
+0.2.9 (2013-03-05)
+------------------
+
+- Fixed a bug in the extra-files supported added in 0.2.8.  Makes sure that
+  monkey-patches can't be installed more than once and that the log
+  reference is properly encapsulated.
+
+
+0.2.8 (2013-03-05)
 ------------------
 
 - Improved handling of packages where the packages_root option is set. That is,
@@ -11,7 +25,7 @@ Changes
   sys.path while processing the setup.cfg and running setup hooks.
 
 - Added support for the Keywords metadata field via the keywords option in the
-  [metadata] section of setup.cfg.
+  ``[metadata]`` section of setup.cfg.
 
 - Fixed a missing import that caused a misleading exception when setup.cfg is
   missing.
@@ -23,6 +37,17 @@ Changes
   latter hasn't been tested.
 
 - Improved hook imports to work better with namespace packages.
+
+- Added support for the extra_files option of the ``[files]`` section in
+  setup.cfg.  This was a feature from distutils2 that provided an alternative
+  to MANIFEST.in for including additional files in source distributions (it
+  does not yet support wildcard patterns but maybe it should?)
+
+- Added support for the tests_require setup argument from setuptools via
+  the [backwards_compat] section in setup.cfg.
+
+- Supports Python 3 natively without 2to3.  This makes Python 3 testing of
+  d2to1 easier to support.
 
 
 0.2.7 (2012-02-20)

@@ -5,13 +5,14 @@ Changes
 0.2.11 (unreleased)
 -------------------
 
-- Nothing changed yet.
+- Replaced ``distribute_setup.py`` with ``ez_setup.py`` in order to bootstrap
+  with modern setuptools when necessary.
 
 
 0.2.10 (2013-04-10)
 -------------------
 
-- Added support for the ``seutp-requires-dist`` option in the ``[metadata]``
+- Added support for the ``setup-requires-dist`` option in the ``[metadata]``
   section of setup.cfg.  This is analogous to the Setup-Requires-Dist metadata
   field supported by PEP-426 and uses the ``setup_requires`` argument to
   setuptools' ``setup()`` to implement it.
